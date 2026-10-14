@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /private/
+
+# This file is dummy content for learning only.
+# Do not place real secrets or credentials here.

@@ -1,0 +1,2 @@
+This is a dummy example file.
+It contains no credentials or secrets.

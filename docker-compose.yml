@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  apache-webscan:
+    image: httpd:2.4-alpine
+    container_name: webscan-apache
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./apache-lab/www:/usr/local/apache2/htdocs:ro
+      - ./apache-lab/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+    command: ["/bin/sh", "-c", "httpd -f /usr/local/apache2/conf/httpd.conf -DFOREGROUND"]

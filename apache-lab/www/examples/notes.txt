@@ -1,0 +1,2 @@
+Example notes only.
+This project is intentionally safe and educational.
