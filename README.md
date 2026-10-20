@@ -12,6 +12,7 @@ The scanner behaves like this:
 - It logs every request before sending it.
 - It only sends GET and POST requests, and it uses a small, fixed list of harmless probe targets.
 - It labels findings as `possible findings requiring manual verification`, not confirmed vulnerabilities.
+- Its optional TCP reachability mode checks exactly one IP address and one port per run. It requires `--authorized`, accepts IP literals only, and does not scan ranges or identify services.
 
 This reduces accidental exposure while still teaching how to inspect HTTP headers, security headers, robots.txt, and redirect behavior.
 
@@ -91,22 +92,38 @@ The directory listing and Apache version disclosure are deliberately exposed for
 
 ```bash
 source .venv/bin/activate
-python3 scanner.py --target http://127.0.0.1:8080/ --authorized
+python3 scanner.py http://127.0.0.1:8080/ --authorized
 ```
 
 For a non-authorized local-only target, this is also allowed:
 
 ```bash
-python3 scanner.py --target http://127.0.0.1:8080/
+python3 scanner.py http://127.0.0.1:8080/
 ```
 
 For other targets, pass the explicit flag:
 
 ```bash
-python3 scanner.py --target https://example.com --authorized
+python3 scanner.py https://example.com --authorized
 ```
 
 The tool saves JSON and Markdown reports in the `reports/` directory.
+
+### Check one TCP port on one IP
+
+Only use this for a system you own or are explicitly authorized to test. The check attempts a single TCP connection; it does not scan other ports, identify the service, or send application data.
+
+```bash
+python3 scanner.py --check-port 192.0.2.10 --port 443 --authorized
+```
+
+IPv6 is supported as an IP literal:
+
+```bash
+python3 scanner.py --check-port 2001:db8::10 --port 443 --authorized
+```
+
+This mode requires both `--check-port IP` and `--port PORT`. It rejects hostnames and network ranges. It writes JSON and Markdown reports like the HTTP scan.
 
 ## Inspect reports
 

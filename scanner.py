@@ -10,7 +10,9 @@ probe for authentication bypasses, or upload or delete files.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import socket
 import sys
 import time
 from datetime import datetime, timezone
@@ -332,6 +334,109 @@ def run_scan(target_url: str, authorized: bool, output_dir: str = "reports", req
     return report
 
 
+def run_port_check(
+    address: str,
+    port: int,
+    authorized: bool,
+    output_dir: str = "reports",
+    timeout: int = TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    if not authorized:
+        raise PermissionError("A TCP port check requires --authorized and explicit permission for the target.")
+    if not 1 <= port <= 65535:
+        raise ValueError("Port must be between 1 and 65535.")
+    if timeout <= 0:
+        raise ValueError("Timeout must be greater than zero.")
+
+    try:
+        parsed_address = ipaddress.ip_address(address)
+    except ValueError as exc:
+        raise ValueError("Port checks accept one IP address only; hostnames and network ranges are not accepted.") from exc
+
+    normalized_address = str(parsed_address)
+    display_address = f"[{normalized_address}]" if parsed_address.version == 6 else normalized_address
+    target = f"tcp://{display_address}:{port}"
+
+    print(f"REQUEST TCP CONNECT {target}")
+    try:
+        with socket.create_connection((normalized_address, port), timeout=timeout):
+            status = "open"
+            evidence = {"ip_address": normalized_address, "port": port, "connection_accepted": True}
+    except ConnectionRefusedError:
+        status = "closed"
+        evidence = {"ip_address": normalized_address, "port": port, "connection_accepted": False}
+    except (socket.timeout, TimeoutError):
+        status = "timed_out"
+        evidence = {"ip_address": normalized_address, "port": port, "connection_accepted": False}
+    except OSError as exc:
+        status = "unreachable_or_filtered"
+        evidence = {
+            "ip_address": normalized_address,
+            "port": port,
+            "connection_accepted": False,
+            "error": str(exc),
+        }
+    print(f"RESPONSE TCP CONNECT {target} -> {status}")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report: Dict[str, Any] = {
+        "timestamp": timestamp,
+        "target": target,
+        "authorized": True,
+        "default_allowlist": ["http://127.0.0.1:8080", "http://localhost:8080"],
+        "checks_performed": [
+            {
+                "method": "TCP CONNECT",
+                "url": target,
+                "status": status,
+                "evidence": evidence,
+            }
+        ],
+        "request_limit": 1,
+        "timeout_seconds": timeout,
+        "delay_seconds": 0,
+        "findings": [],
+        "observations": [
+            {
+                "check": "tcp_port_reachability",
+                "severity": "info",
+                "status": status,
+                "finding": (
+                    "A TCP connection was accepted. An open port is not itself a vulnerability; "
+                    "confirm that this service is expected to be reachable."
+                    if status == "open"
+                    else "No TCP connection was established. This result alone cannot distinguish a closed port from filtering or routing issues."
+                ),
+                "evidence": evidence,
+            }
+        ],
+        "limitations": [
+            "This check attempts exactly one TCP connection to one explicit IP address and port.",
+            "It does not scan port ranges, discover services, send application data, or perform vulnerability checks.",
+            "A timeout or connection error does not prove that a port is closed.",
+            "This is an informational reachability observation, not a confirmed vulnerability.",
+        ],
+        "remediation": [
+            "Verify that any reachable service is expected and restricted to intended networks.",
+            "Use firewall rules to limit access to services that do not need to be publicly reachable.",
+        ],
+    }
+
+    reports_dir = Path(output_dir)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    file_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    file_address = normalized_address.replace(".", "-").replace(":", "-")
+    report_stem = f"{file_timestamp}-{file_address}-{port}"
+    json_path = reports_dir / f"{report_stem}.json"
+    markdown_path = reports_dir / f"{report_stem}.md"
+
+    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    markdown_path.write_text(render_markdown_report(report), encoding="utf-8")
+    print(f"Saved JSON report: {json_path}")
+    print(f"Saved Markdown report: {markdown_path}")
+    return report
+
+
 def safe_filename(target_url: str) -> str:
     parsed = parse_target(target_url)
     host = parsed.hostname or "target"
@@ -352,8 +457,16 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Checks performed")
     for item in report["checks_performed"]:
-        lines.append(f"- {item['method']} {item['url']} -> {item['status_code']}")
+        status = item.get("status", item.get("status_code"))
+        lines.append(f"- {item['method']} {item['url']} -> {status}")
     lines.append("")
+    if report.get("observations"):
+        lines.append("## Observations")
+        for item in report["observations"]:
+            lines.append(f"- [{item['severity'].upper()}] {item['check']}: {item['finding']}")
+            lines.append(f"  - Status: {item['status']}")
+            lines.append(f"  - Evidence: {json.dumps(item['evidence'], sort_keys=True)}")
+        lines.append("")
     lines.append("## Possible findings")
     if not report["findings"]:
         lines.append("- No possible findings were detected after the allowed low-impact checks.")
@@ -376,7 +489,9 @@ def render_markdown_report(report: Dict[str, Any]) -> str:
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Low-impact HTTP scanner for authorized testing only.")
-    parser.add_argument("target", help="Target URL to scan, such as http://127.0.0.1:8080/")
+    parser.add_argument("target", nargs="?", help="Target URL to scan, such as http://127.0.0.1:8080/")
+    parser.add_argument("--check-port", metavar="IP", help="Check one TCP port on one IP address (requires --port and --authorized).")
+    parser.add_argument("--port", type=int, help="Single TCP port to check with --check-port.")
     parser.add_argument("--authorized", action="store_true", help="Explicitly confirm you are authorized to scan this target.")
     parser.add_argument("--output-dir", default="reports", help="Directory for JSON and Markdown reports (default: reports)")
     parser.add_argument("--limit", type=int, default=REQUEST_LIMIT, help=f"Maximum number of requests to send (default: {REQUEST_LIMIT})")
@@ -384,21 +499,45 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--delay", type=float, default=REQUEST_DELAY_SECONDS, help=f"Delay between requests in seconds (default: {REQUEST_DELAY_SECONDS})")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    if args.check_port:
+        if args.target:
+            parser.error("Do not provide a URL when using --check-port.")
+        if args.port is None:
+            parser.error("--port is required when using --check-port.")
+    else:
+        if args.target is None:
+            parser.error("Provide a target URL or use --check-port with --port.")
+        if args.port is not None:
+            parser.error("--port can only be used with --check-port.")
+
     try:
-        report = run_scan(
-            args.target,
-            authorized=args.authorized,
-            output_dir=args.output_dir,
-            request_limit=args.limit,
-            timeout=args.timeout,
-            delay=args.delay,
-        )
+        if args.check_port:
+            report = run_port_check(
+                args.check_port,
+                args.port,
+                authorized=args.authorized,
+                output_dir=args.output_dir,
+                timeout=args.timeout,
+            )
+        else:
+            report = run_scan(
+                args.target,
+                authorized=args.authorized,
+                output_dir=args.output_dir,
+                request_limit=args.limit,
+                timeout=args.timeout,
+                delay=args.delay,
+            )
     except (PermissionError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     except requests.RequestException as exc:
         print(f"ERROR: Network request failed: {exc}", file=sys.stderr)
         return 1
+
+    if "observations" in report:
+        print(f"TCP port check result: {report['observations'][0]['status']}")
+        return 0
 
     print("Summary: possible findings requiring manual verification")
     if report["findings"]:

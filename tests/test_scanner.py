@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from scanner import run_scan
+from scanner import run_port_check, run_scan
 
 
 class DummyResponse:
@@ -73,3 +73,42 @@ def test_markdown_report_includes_sections(tmp_path):
     assert "## Limitations" in contents
     assert "## Remediation suggestions" in contents
     assert "manual verification" in json.dumps(report).lower()
+
+
+def test_port_check_reports_open_port_without_network(tmp_path):
+    with patch("scanner.socket.create_connection") as create_connection:
+        create_connection.return_value.__enter__.return_value = object()
+        report = run_port_check("192.0.2.10", 443, authorized=True, output_dir=str(tmp_path), timeout=2)
+
+    create_connection.assert_called_once_with(("192.0.2.10", 443), timeout=2)
+    assert report["checks_performed"][0]["status"] == "open"
+    assert report["observations"][0]["severity"] == "info"
+    assert report["request_limit"] == 1
+    assert next(Path(tmp_path).glob("*.json")).exists()
+    markdown_file = next(Path(tmp_path).glob("*.md"))
+    assert "## Observations" in markdown_file.read_text(encoding="utf-8")
+
+
+def test_port_check_requires_authorization(tmp_path):
+    try:
+        run_port_check("192.0.2.10", 443, authorized=False, output_dir=str(tmp_path))
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("Port checks must require explicit authorization.")
+
+
+def test_port_check_rejects_hostnames_and_networks(tmp_path):
+    for address in ("example.com", "192.0.2.0/24"):
+        try:
+            run_port_check(address, 443, authorized=True, output_dir=str(tmp_path))
+        except ValueError:
+            continue
+        raise AssertionError(f"Expected invalid IP address to be rejected: {address}")
+
+
+def test_port_check_reports_connection_refused(tmp_path):
+    with patch("scanner.socket.create_connection", side_effect=ConnectionRefusedError):
+        report = run_port_check("192.0.2.10", 443, authorized=True, output_dir=str(tmp_path))
+
+    assert report["checks_performed"][0]["status"] == "closed"
